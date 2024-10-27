@@ -30,6 +30,7 @@ import io
 import math
 import os.path as op
 import sys
+from rapidfuzz import process, fuzz
 
 
 class Segmenter(object):
@@ -38,22 +39,22 @@ class Segmenter(object):
     Support for object-oriented programming and customization.
 
     """
-    ALPHABET = set('abcdefghijklmnopqrstuvwxyz0123456789')
+
+    ALPHABET = set("abcdefghijklmnopqrstuvwxyz0123456789")
     UNIGRAMS_FILENAME = op.join(
         op.dirname(op.realpath(__file__)),
-        'unigrams.txt',
+        "city_unigrams.txt",
     )
     BIGRAMS_FILENAME = op.join(
         op.dirname(op.realpath(__file__)),
-        'bigrams.txt',
+        "city_bigrams.txt",
     )
     TOTAL = 1024908267229.0
     LIMIT = 24
     WORDS_FILENAME = op.join(
         op.dirname(op.realpath(__file__)),
-        'words.txt',
+        "words.txt",
     )
-
 
     def __init__(self):
         self.unigrams = {}
@@ -61,26 +62,67 @@ class Segmenter(object):
         self.total = 0.0
         self.limit = 0
         self.words = []
+        self.fuzzy_scores = {}
+        self.choices = []
 
+    def create_file_path(self, file_name):
+        return op.join(
+            op.dirname(op.realpath(__file__)),
+            file_name,
+        )
 
-    def load(self):
+    def create_choices(self, filename):
+        with io.open(self.create_file_path(filename), encoding="utf-8") as reader:
+            for line in reader:
+                unigram = line.split("\t")[0]
+                yield unigram
+
+    def load(self, unigram_files, bigram_files):
         "Load unigram and bigram counts from disk."
-        self.unigrams.update(self.parse(self.UNIGRAMS_FILENAME))
-        self.bigrams.update(self.parse(self.BIGRAMS_FILENAME))
+        # self.unigrams.update(self.parse(self.create_file_path("unigrams.txt")))
+        # self.bigrams.update(self.parse(self.create_file_path("bigrams.txt")))
+        self.load_unigram_files(unigram_files)
+        self.load_bigram_files(bigram_files)
         self.total = self.TOTAL
         self.limit = self.LIMIT
-        with io.open(self.WORDS_FILENAME, encoding='utf-8') as reader:
+        with io.open(self.WORDS_FILENAME, encoding="utf-8") as reader:
             text = reader.read()
             self.words.extend(text.splitlines())
 
+        for unigram_file in unigram_files:
+            self.choices.extend(list(self.create_choices(unigram_file)))
+
+        for bigram_file in bigram_files:
+            self.choices.extend(list(self.create_choices(bigram_file)))
+
+    def load_unigram_files(self, files):
+        if type(files) is not list:
+            return "please provide a list of files as an argument"
+        for file in files:
+            self.unigrams.update(self.parse(self.create_file_path(file)))
+
+    def load_bigram_files(self, files):
+        if type(files) is not list:
+            return "please provide a list of files as an argument"
+        for file in files:
+            self.bigrams.update(self.parse(self.create_file_path(file)))
 
     @staticmethod
     def parse(filename):
         "Read `filename` and parse tab-separated file of word and count pairs."
-        with io.open(filename, encoding='utf-8') as reader:
-            lines = (line.split('\t') for line in reader)
+        with io.open(filename, encoding="utf-8") as reader:
+            lines = (line.split("\t") for line in reader)
             return dict((word, float(number)) for word, number in lines)
 
+    def max_score(self, text, choices, limit=2):
+        return max(
+            process.extract(
+                text,
+                choices,
+                scorer=fuzz.ratio,
+                limit=limit,
+            )
+        )
 
     def score(self, word, previous=None):
         "Score `word` in the context of `previous` word."
@@ -98,9 +140,17 @@ class Segmenter(object):
             # Penalize words not found in the unigrams according
             # to their length, a crucial heuristic.
 
+            if word not in self.fuzzy_scores:
+                self.fuzzy_scores[word] = self.max_score(word, self.choices)
+
+            # fuzzy_word is a tuple with 3 elements
+            fuzzy_word = self.fuzzy_scores[word]
+            if fuzzy_word[1] >= 70.0 and fuzzy_word[0] in unigrams:
+                return unigrams[fuzzy_word[0]] / total
+
             return 10.0 / (total * 10 ** len(word))
 
-        bigram = '{0} {1}'.format(previous, word)
+        bigram = "{0} {1}".format(previous, word)
 
         if bigram in bigrams and previous in unigrams:
 
@@ -115,14 +165,13 @@ class Segmenter(object):
 
         return self.score(word)
 
-
     def isegment(self, text):
-        "Return iterator of words that is the best segmenation of `text`."
+        "Return iterator of words that is the best segmentation of `text`."
         memo = dict()
 
-        def search(text, previous='<s>'):
+        def search(text, previous="<s>"):
             "Return max of candidates matching `text` given `previous` word."
-            if text == '':
+            if text == "":
                 return 0.0, []
 
             def candidates():
@@ -137,6 +186,9 @@ class Segmenter(object):
 
                     yield (prefix_score + suffix_score, [prefix] + suffix_words)
 
+            # print(memo)
+            # print(list(candidates()))
+
             return max(candidates())
 
         # Avoid recursion limit issues by dividing text into chunks, segmenting
@@ -146,12 +198,12 @@ class Segmenter(object):
 
         clean_text = self.clean(text)
         size = 250
-        prefix = ''
+        prefix = ""
 
         for offset in range(0, len(clean_text), size):
-            chunk = clean_text[offset:(offset + size)]
+            chunk = clean_text[offset : (offset + size)]
             _, chunk_words = search(prefix + chunk)
-            prefix = ''.join(chunk_words[-5:])
+            prefix = "".join(chunk_words[-5:])
             del chunk_words[-5:]
             for word in chunk_words:
                 yield word
@@ -161,17 +213,14 @@ class Segmenter(object):
         for word in prefix_words:
             yield word
 
-
     def segment(self, text):
         "Return list of words that is the best segmenation of `text`."
         return list(self.isegment(text))
-
 
     def divide(self, text):
         "Yield `(prefix, suffix)` pairs from `text`."
         for pos in range(1, min(len(text), self.limit) + 1):
             yield (text[:pos], text[pos:])
-
 
     @classmethod
     def clean(cls, text):
@@ -179,14 +228,14 @@ class Segmenter(object):
         alphabet = cls.ALPHABET
         text_lower = text.lower()
         letters = (letter for letter in text_lower if letter in alphabet)
-        return ''.join(letters)
+        return "".join(letters)
 
 
-_segmenter = Segmenter()        # pylint: disable=invalid-name
-clean = _segmenter.clean        # pylint: disable=invalid-name
-load = _segmenter.load          # pylint: disable=invalid-name
+_segmenter = Segmenter()  # pylint: disable=invalid-name
+clean = _segmenter.clean  # pylint: disable=invalid-name
+load = _segmenter.load  # pylint: disable=invalid-name
 isegment = _segmenter.isegment  # pylint: disable=invalid-name
-segment = _segmenter.segment    # pylint: disable=invalid-name
+segment = _segmenter.segment  # pylint: disable=invalid-name
 UNIGRAMS = _segmenter.unigrams
 BIGRAMS = _segmenter.bigrams
 WORDS = _segmenter.words
@@ -202,33 +251,40 @@ def main(arguments=()):
     import argparse
     import os
 
-    parser = argparse.ArgumentParser(description='English Word Segmentation')
-    parser.add_argument('infile', nargs='?', type=argparse.FileType('r'),
-                        default=sys.stdin)
-    parser.add_argument('outfile', nargs='?', type=argparse.FileType('w'),
-                        default=sys.stdout)
+    parser = argparse.ArgumentParser(description="English Word Segmentation")
+    parser.add_argument(
+        "infile", nargs="?", type=argparse.FileType("r"), default=sys.stdin
+    )
+    parser.add_argument(
+        "outfile", nargs="?", type=argparse.FileType("w"), default=sys.stdout
+    )
 
     streams = parser.parse_args(arguments)
-    load()
+    # load()
+    load(["city_unigrams.txt"], ["city_bigrams.txt"])
 
-    for line in iter(streams.infile.readline, ''):
-        streams.outfile.write(' '.join(segment(line.strip())))
+    for line in iter(streams.infile.readline, ""):
+        streams.outfile.write(" ".join(segment(line.strip())))
         streams.outfile.write(os.linesep)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main(sys.argv[1:])
 
 
 __all__ = [
-    'Segmenter',
-    'load', 'isegment', 'segment',
-    'UNIGRAMS', 'BIGRAMS', 'WORDS',
-    'main'
+    "Segmenter",
+    "load",
+    "isegment",
+    "segment",
+    "UNIGRAMS",
+    "BIGRAMS",
+    "WORDS",
+    "main",
 ]
-__title__ = 'wordsegment'
-__version__ = '1.3.1'
+__title__ = "wordsegment"
+__version__ = "1.3.1"
 __build__ = 0x010301
-__author__ = 'Grant Jenks'
-__license__ = 'Apache 2.0'
-__copyright__ = 'Copyright 2018 Grant Jenks'
+__author__ = "Grant Jenks"
+__license__ = "Apache 2.0"
+__copyright__ = "Copyright 2018 Grant Jenks"
